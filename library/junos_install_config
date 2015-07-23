@@ -131,6 +131,21 @@ options:
             - Provide a confirm in minutes to the commit of the configuration
         required: false
         default: None
+    syslog_address:
+        description:
+            - Address of a syslog server the logs will be sent to
+        required: false
+        default: None
+    syslog_port:
+        description:
+            - Port used to contact the syslog server, if any was set
+        required: false
+        default: 512
+    console_logging:
+        description:
+            - Enable or disable logging on the current console
+        required: false
+        default: True
 '''
 
 EXAMPLES = '''
@@ -156,6 +171,7 @@ EXAMPLES = '''
 '''
 
 import logging
+import logging.handlers
 from os.path import isfile
 import os
 from distutils.version import LooseVersion
@@ -187,16 +203,16 @@ def junos_install_config(module, dev):
     results['file'] = file_path
     results['changed'] = False
 
-    logging.info("pushing file: {0}".format(file_path))
+    logger.info("pushing file: {0}".format(file_path))
     try:
-        logging.info("taking lock")
+        logger.info("taking lock")
         cu.lock()
 
         try:
             # load the config.  the cu.load will raise
             # an exception if there is even a warning.
             # so we want to avoid that condition.
-            logging.info("loading config")
+            logger.info("loading config")
             load_args = {'path': file_path}
             overwrite = module.boolean(module.params['overwrite'])
             if overwrite is True:
@@ -205,17 +221,17 @@ def junos_install_config(module, dev):
                 load_args['merge'] = True
             cu.load(**load_args)
         except ValueError as err:
-            logging.error("unable to load config:{0}".format(err.message))
+            logger.error("unable to load config:{0}".format(err.message))
             raise err
         except ConfigLoadError as err:
-            logging.error("unable to load config:{0},{1},{2}".format(err.errs['severity'],
+            logger.error("unable to load config:{0},{1},{2}".format(err.errs['severity'],
                                                                      err.errs['bad_element'],
                                                                      err.errs['message']))
             raise err
         except Exception as err:
             if err.rsp.find('.//ok') is None:
                 rpc_msg = err.rsp.findtext('.//error-message')
-                logging.error("unable to load config:{0}".format(rpc_msg))
+                logger.error("unable to load config:{0}".format(rpc_msg))
             raise err
         else:
             pass
@@ -239,10 +255,10 @@ def junos_install_config(module, dev):
                     module.fail_json(msg=msg)
 
             if (in_check_mode):
-                logging.info("doing a commit-check, please be patient")
+                logger.info("doing a commit-check, please be patient")
                 cu.commit_check()
             else:
-                logging.info("committing change, please be patient")
+                logger.info("committing change, please be patient")
                 opts = {}
                 if args['comment'] is not None:
                     opts['comment'] = args['comment']
@@ -252,15 +268,15 @@ def junos_install_config(module, dev):
                 cu.commit(**opts)
                 results['changed'] = True
 
-        logging.info("unlocking")
+        logger.info("unlocking")
         cu.unlock()
-        logging.info("change completed")
+        logger.info("change completed")
 
     except LockError:
         results['failed'] = True
         msg = "Unable to lock configuration"
         results['msg'] = msg
-        logging.error(msg)
+        logger.error(msg)
 
     except CommitError as err:
         results['failed'] = True
@@ -268,13 +284,13 @@ def junos_install_config(module, dev):
                                                                   err.errs['bad_element'],
                                                                   err.errs['message'])
         results['msg'] = msg
-        logging.error(msg)
+        logger.error(msg)
 
     except Exception as err:
         results['failed'] = True
         msg = "Unable to make changes"
         results['msg'] = msg
-        logging.error(msg)
+        logger.error(msg)
 
     return results
 
@@ -283,12 +299,33 @@ def _load_via_netconf(module):
     args = module.params
 
     logfile = args['logfile']
-    if logfile is not None:
-        logging.basicConfig(filename=logfile, level=logging.INFO,
-                            format='%(asctime)s:%(name)s:%(message)s')
-        logging.getLogger().name = 'CONFIG:' + args['host']
+    syslog_address = args['syslog_address']
+    syslog_port = args['syslog_port']
+    console_logging = args['console_logging']
 
-    logging.info("connecting to host: {0}@{1}:{2}".format(args['user'], args['host'], args['port']))
+    logger = logging.getLogger('CONFIG:' + args['host'])
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s:%(name)s:%(message)s')
+
+    if logfile is not None:
+        file_handler = logging.FileHandler(logfile)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    if syslog_address is not None:
+        syslog_handler = logging.handlers.SysLogHandler((syslog_address, syslog_port))
+        syslog_handler.setFormatter(formatter)
+        syslog_handler.setLevel(logging.INFO)
+        logger.addHandler(syslog_handler)
+
+    if console_logging is True:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        console_handler.setLevel(logging.ERROR)
+        logger.addHandler(console_handler)
+
+    logger.info("connecting to host: {0}@{1}:{2}".format(args['user'], args['host'], args['port']))
 
     try:
         dev = Device(args['host'], user=args['user'], password=args['passwd'], port=args['port'])
@@ -337,13 +374,34 @@ def _load_via_console(module):
     c_args.append(m_args['host'])
 
     logfile = m_args['logfile']
+    syslog_address = args['syslog_address']
+    syslog_port = args['syslog_port']
+    console_logging = args['console_logging']
+
+    logger = logging.getLogger('CONFIG:' + args['host'])
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s:%(name)s:%(message)s')
+
     if logfile is not None:
-        logging.basicConfig(filename=logfile, level=logging.INFO,
-                            format='%(asctime)s:%(name)s:%(message)s')
-        logging.getLogger().name = 'NETCONIFY:' + m_args['host']
+        file_handler = logging.FileHandler(logfile)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    if syslog_address is not None:
+        syslog_handler = logging.handlers.SysLogHandler((syslog_address, syslog_port))
+        syslog_handler.setFormatter(formatter)
+        syslog_handler.setLevel(logging.INFO)
+        logger.addHandler(syslog_handler)
+
+    if console_logging is True:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        console_handler.setLevel(logging.ERROR)
+        logger.addHandler(console_handler)
 
         def log_notify(self, event, message):
-            logging.info("%s:%s" % (event, message))
+            logger.info("%s:%s" % (event, message))
         use_notifier = log_notify
     else:
         def silent_notify(self, event, message):
@@ -381,7 +439,10 @@ def main():
             timeout=dict(required=False, default=0),
             comment=dict(required=False, default=None),
             port=dict(required=False, default=830),
-            confirm=dict(required=False, default=None)
+            confirm=dict(required=False, default=None),
+            syslog_address=dict(required=False, default=None),
+            syslog_port=dict(required=False, default=512),
+            console_logging=dict(required=False, default=True)
         ),
         supports_check_mode=True)
 
